@@ -73,9 +73,9 @@ No credentials are stored in this repository. Tools read them from environment v
 - `palo_config_change*.py` uses `msvcrt` for timed console prompts, so it runs on **Windows**. The other Python tools are cross-platform.
 - Python 3.9+ recommended. PowerShell scripts need Windows PowerShell 5.1 or PowerShell 7 on Windows (they use `Get-NetTCPConnection`).
 
-## Version history
+## Versions
 
-Earlier iterations of these tools are kept in a private repository; this repo contains the current versions only.
+This repository contains the current version of each tool.
 
 ## License
 
