@@ -1,0 +1,13 @@
+# Palo Alto PAN-OS tools
+requests>=2.31
+flask>=3.0            # paloalto/config-change-webapp
+fastapi>=0.110        # paloalto/policy-api
+uvicorn>=0.29         # paloalto/policy-api
+pydantic>=2.0         # paloalto/policy-api (FastAPI dependency)
+pan-os-python>=1.12   # paloalto/address-object-updater
+
+# VeloCloud
+tabulate>=0.9
+
+# FortiGate runbook generator
+python-docx>=1.1

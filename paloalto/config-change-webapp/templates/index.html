@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Palo Alto Config Manager</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="container mx-auto p-6">
+        <h1 class="text-3xl font-bold mb-6 text-center">Palo Alto Config Manager (Version 1.0.1)</h1>
+        <div class="bg-white shadow-md rounded-lg p-6">
+            <form method="POST" enctype="multipart/form-data" class="space-y-4">
+                <!-- Firewall IP/Hostname -->
+                <div>
+                    <label for="host" class="block text-sm font-medium text-gray-700">Firewall IP/Hostname (e.g., 192.0.2.10):</label>
+                    <input type="text" id="host" name="host" value="{{ cached_host if cached_host else '' }}" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" required>
+                </div>
+
+                <!-- Certificate Files -->
+                <div>
+                    <label for="cert_file" class="block text-sm font-medium text-gray-700">Client Certificate File (api_cert.pem):</label>
+                    <input type="file" id="cert_file" name="cert_file" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                </div>
+                <div>
+                    <label for="key_file" class="block text-sm font-medium text-gray-700">Private Key File (api_key.key):</label>
+                    <input type="file" id="key_file" name="key_file" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                </div>
+
+                <!-- Username and Password (for deprecated method) -->
+                <div id="auth_fields" style="display: none;">
+                    <div>
+                        <label for="username" class="block text-sm font-medium text-gray-700">Username:</label>
+                        <input type="text" id="username" name="username" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    </div>
+                    <div>
+                        <label for="password" class="block text-sm font-medium text-gray-700">Password:</label>
+                        <input type="password" id="password" name="password" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    </div>
+                </div>
+
+                <!-- Action Selection -->
+                <div>
+                    <label for="action" class="block text-sm font-medium text-gray-700">Select Action:</label>
+                    <select id="action" name="action" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm" onchange="toggleInputs()">
+                        <option value="1">Backup Running Config</option>
+                        <option value="2">Delete Objects</option>
+                        <option value="3">Replace Objects</option>
+                        <option value="4">Add New Objects Interactively</option>
+                        <option value="5">Restore Running Config</option>
+                        <option value="7">Create/Update Objects in Batch</option>
+                    </select>
+                </div>
+
+                <!-- Additional Inputs Based on Action -->
+                <!-- Delete Objects -->
+                <div id="delete_inputs" style="display: none;" class="space-y-4">
+                    <div>
+                        <label for="objects_to_delete_file" class="block text-sm font-medium text-gray-700">Upload objects_to_delete.txt (one name per line):</label>
+                        <input type="file" id="objects_to_delete_file" name="objects_to_delete_file" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    </div>
+                </div>
+
+                <!-- Replace Objects -->
+                <div id="replace_inputs" style="display: none;" class="space-y-4">
+                    <div>
+                        <label for="objects_to_replace_file" class="block text-sm font-medium text-gray-700">Upload objects_to_delete.txt (old objects, one name per line):</label>
+                        <input type="file" id="objects_to_replace_file" name="objects_to_replace_file" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    </div>
+                    <div>
+                        <label for="new_objects_file" class="block text-sm font-medium text-gray-700">Upload new_objects.txt (new values, name,value per line):</label>
+                        <input type="file" id="new_objects_file" name="new_objects_file" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    </div>
+                </div>
+
+                <!-- Add New Objects -->
+                <div id="add_inputs" style="display: none;" class="space-y-4">
+                    <div>
+                        <label for="object_name" class="block text-sm font-medium text-gray-700">Object Name:</label>
+                        <input type="text" id="object_name" name="object_name" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    </div>
+                    <div>
+                        <label for="object_value" class="block text-sm font-medium text-gray-700">Object Value (e.g., 192.0.2.99/32):</label>
+                        <input type="text" id="object_value" name="object_value" class="mt-1 block w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm">
+                    </div>
+                </div>
+
+                <!-- Restore Config -->
+                <div id="restore_inputs" style="display: none;" class="space-y-4">
+                    <div>
+                        <label for="config_file" class="block text-sm font-medium text-gray-700">Upload Configuration File (e.g., FW01_cfg_202401011200.xml):</label>
+                        <input type="file" id="config_file" name="config_file" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    </div>
+                </div>
+
+                <!-- Batch Create/Update -->
+                <div id="batch_inputs" style="display: none;" class="space-y-4">
+                    <div>
+                        <label for="batch_file" class="block text-sm font-medium text-gray-700">Upload new_objects_batch.txt (name,value per line):</label>
+                        <input type="file" id="batch_file" name="batch_file" class="mt-1 block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-indigo-50 file:text-indigo-700 hover:file:bg-indigo-100">
+                    </div>
+                </div>
+
+                <!-- Submit Button -->
+                <div class="text-center">
+                    <button type="submit" class="inline-flex justify-center py-2 px-4 border border-transparent shadow-sm text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">Execute Action</button>
+                </div>
+            </form>
+
+            <!-- Output Section -->
+            {% if output %}
+            <div class="mt-6">
+                <h2 class="text-xl font-semibold mb-2">Output:</h2>
+                <pre class="bg-gray-100 p-4 rounded-md whitespace-pre-wrap">{{ output }}</pre>
+            </div>
+            {% endif %}
+        </div>
+    </div>
+
+    <script>
+        function toggleInputs() {
+            const action = document.getElementById('action').value;
+            document.getElementById('delete_inputs').style.display = action === '2' ? 'block' : 'none';
+            document.getElementById('replace_inputs').style.display = action === '3' ? 'block' : 'none';
+            document.getElementById('add_inputs').style.display = action === '4' ? 'block' : 'none';
+            document.getElementById('restore_inputs').style.display = action === '5' ? 'block' : 'none';
+            document.getElementById('batch_inputs').style.display = action === '7' ? 'block' : 'none';
+
+            // Show username/password fields if certificate files are not provided
+            const certFile = document.getElementById('cert_file').value;
+            const keyFile = document.getElementById('key_file').value;
+            document.getElementById('auth_fields').style.display = (!certFile || !keyFile) ? 'block' : 'none';
+        }
+
+        // Initial toggle on page load
+        toggleInputs();
+    </script>
+</body>
+</html>

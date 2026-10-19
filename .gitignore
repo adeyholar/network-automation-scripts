@@ -1,0 +1,28 @@
+# Secrets and local config
+.env
+*.key
+*.pem
+*.crt
+*.p12
+*.pfx
+
+# Firewall config backups and exports (may contain real network data)
+*.xml
+*.csv
+*.xlsx
+*.docx
+!paloalto/**/templates/*.html
+
+# Local caches written by the tools
+last_firewall.txt
+last_host.txt
+objects_to_update.txt
+object_replacements.txt
+*.log
+network_scan_output*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
