@@ -22,7 +22,6 @@ paloalto/
   config-change-webapp/    app.py + templates/index.html (Flask)
   policy-api/              policy_export_api.py (FastAPI)
   address-object-updater/  update_address_objects.py (pan-os-python)
-  archive/                 earlier versions, kept for reference (see below)
 velocloud/                 non_sdwan_destinations.py, non_sdwan_destinations_login.py
 fortigate/                 ipsec_vpn_runbook_to_docx.py
 powershell/                network_scan.ps1
@@ -74,9 +73,9 @@ No credentials are stored in this repository. Tools read them from environment v
 - `palo_config_change*.py` uses `msvcrt` for timed console prompts, so it runs on **Windows**. The other Python tools are cross-platform.
 - Python 3.9+ recommended. PowerShell scripts need Windows PowerShell 5.1 or PowerShell 7 on Windows (they use `Get-NetTCPConnection`).
 
-## Archive
+## Version history
 
-`*/archive/` folders keep earlier iterations of each tool, renamed to semantic versions, so the evolution of the approach is visible (for example the object-update scripts that grew into the config-change CLI). They are sanitized the same way as the current tools but are **not maintained**; use the top-level versions. Exact duplicates and versions that never parsed were left out.
+Earlier iterations of these tools are kept in a private repository; this repo contains the current versions only.
 
 ## License
 

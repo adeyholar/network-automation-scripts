@@ -11,4 +11,4 @@
 .\network_scan.ps1                                   # output next to the script
 $env:NETSCAN_OUTPUT_DIR = "D:\scans"; .\network_scan.ps1
 ```
-Note: remote IPs are sent to ip-api.com for geolocation. Remove `Get-CountryFromIP` if that is not acceptable in your environment. `archive/` holds earlier versions.
+Note: remote IPs are sent to ip-api.com for geolocation. Remove `Get-CountryFromIP` if that is not acceptable in your environment.

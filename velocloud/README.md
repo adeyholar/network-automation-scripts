@@ -4,7 +4,6 @@
 
 - `non_sdwan_destinations.py` — authenticates with an API token.
 - `non_sdwan_destinations_login.py` — logs in with username and password (`login/enterpriseLogin`) and uses the session.
-- `archive/` — earlier version, not maintained.
 
 **Requirements:** Python 3.9+, `requests`, `tabulate`. Set `VCO_URL` plus `VCO_API_TOKEN` (or `VCO_USERNAME`/`VCO_PASSWORD`); anything not set is prompted for, with secrets entered hidden.
 

@@ -51,12 +51,3 @@ uvicorn policy_export_api:app --reload   # docs at http://127.0.0.1:8000/docs
 **Requirements:** Python 3.9+, `pan-os-python`.
 
 **Usage:** `python update_address_objects.py`
-
-## archive
-
-Earlier iterations, renamed to semantic versions and sanitized:
-- `archive/config-change-cli/` — CLI releases 1.4.5 to 1.5.17.
-- `archive/object-update/` — the object-update scripts (0.x and 1.0 to 1.4.3) that evolved into the CLI.
-- `archive/policy-api/` — earlier apply/undo and export API versions.
-
-Not maintained; use the top-level tools.
