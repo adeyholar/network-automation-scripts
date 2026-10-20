@@ -1,7 +1,11 @@
 from flask import Flask, render_template, request, redirect, url_for
+from werkzeug.utils import secure_filename
+import secrets
 import requests
 import xml.etree.ElementTree as ET
+from defusedxml.ElementTree import fromstring as safe_fromstring
 from urllib.parse import quote
+from xml.sax.saxutils import quoteattr
 import socket
 import ssl
 import time
@@ -12,7 +16,7 @@ import argparse
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
-from panos_safety import configure_tls, tls_verify, remove_object_from_rule, commit_own_changes
+from panos_safety import configure_tls, tls_verify, xpath_literal, remove_object_from_rule, commit_own_changes
 
 # Per-request commit settings: commits are partial (this admin's changes only) and
 # happen only when the operator ticks the "commit my changes" box.
@@ -20,12 +24,23 @@ ADMIN_USER = None
 COMMIT_CONFIRMED = False
 
 app = Flask(__name__)
+# Uploads (config backups, object lists, certs) are capped; default 20 MB.
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("FLASK_MAX_UPLOAD_MB", "20")) * 1024 * 1024
+_secret = os.environ.get("FLASK_SECRET_KEY")
+if not _secret:
+    print("WARNING: FLASK_SECRET_KEY is not set; using a random key for this process only.")
+    _secret = secrets.token_hex(32)
+app.secret_key = _secret
 
 # Script version
 SCRIPT_VERSION = "1.0.1"
 
 # Global variable to store output
 output = []
+
+@app.errorhandler(413)
+def upload_too_large(_e):
+    return "Upload too large (limit set by FLASK_MAX_UPLOAD_MB).", 413
 
 # Helper function to append output
 def append_output(message):
@@ -97,7 +112,7 @@ def get_api_key(host, username, password):
     except requests.RequestException as e:
         status = getattr(getattr(e, "response", None), "status_code", None)
         raise requests.RequestException(f"API key request failed ({type(e).__name__}, HTTP {status})") from None
-    root = ET.fromstring(response.text)
+    root = safe_fromstring(response.text)
     key = root.find(".//key").text
     return key, api_url
 
@@ -126,7 +141,7 @@ def read_objects_file(file_obj, name_only=False):
 # Check if an address object exists on the firewall
 def check_object_exists(host, cert_files, object_name, api_key=None):
     api_url = f"https://{host}/api/"
-    url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name='{object_name}']"
+    url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name={xpath_literal(object_name)}]"
     
     if cert_files:
         response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
@@ -135,13 +150,13 @@ def check_object_exists(host, cert_files, object_name, api_key=None):
         response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
     
     response.raise_for_status()
-    root = ET.fromstring(response.text)
+    root = safe_fromstring(response.text)
     return root.find(".//entry") is not None
 
 # Check if an address object group exists on the firewall
 def check_group_exists(host, cert_files, group_name, api_key=None):
     api_url = f"https://{host}/api/"
-    url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name='{group_name}']"
+    url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name={xpath_literal(group_name)}]"
     
     if cert_files:
         response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
@@ -150,7 +165,7 @@ def check_group_exists(host, cert_files, group_name, api_key=None):
         response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
     
     response.raise_for_status()
-    root = ET.fromstring(response.text)
+    root = safe_fromstring(response.text)
     return root.find(".//entry") is not None
 
 # Check if an address object is used in policies, NAT rules, or address groups
@@ -171,7 +186,7 @@ def check_object_usage(host, cert_files, object_name, api_key=None):
             headers = {"X-PAN-KEY": api_key}
             response = requests.get(url_policies, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
-        root = ET.fromstring(response.text)
+        root = safe_fromstring(response.text)
         for rule in root.findall(".//entry"):
             rule_name = rule.get("name")
             for member in rule.findall(".//member"):
@@ -189,7 +204,7 @@ def check_object_usage(host, cert_files, object_name, api_key=None):
             headers = {"X-PAN-KEY": api_key}
             response = requests.get(url_nat, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
-        root = ET.fromstring(response.text)
+        root = safe_fromstring(response.text)
         for rule in root.findall(".//entry"):
             rule_name = rule.get("name")
             for member in rule.findall(".//member"):
@@ -207,7 +222,7 @@ def check_object_usage(host, cert_files, object_name, api_key=None):
             headers = {"X-PAN-KEY": api_key}
             response = requests.get(url_groups, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
-        root = ET.fromstring(response.text)
+        root = safe_fromstring(response.text)
         for group in root.findall(".//entry"):
             group_name = group.get("name")
             for member in group.findall(".//member"):
@@ -221,7 +236,7 @@ def check_object_usage(host, cert_files, object_name, api_key=None):
 # Remove an object from an address group
 def remove_object_from_group(host, cert_files, object_name, group_name, api_key=None):
     api_url = f"https://{host}/api/"
-    url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name='{group_name}']"
+    url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name={xpath_literal(group_name)}]"
     
     if cert_files:
         response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
@@ -230,7 +245,7 @@ def remove_object_from_group(host, cert_files, object_name, group_name, api_key=
         response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
     
     response.raise_for_status()
-    root = ET.fromstring(response.text)
+    root = safe_fromstring(response.text)
     
     # Find the members list
     members = root.find(".//static")
@@ -258,7 +273,7 @@ def remove_object_from_group(host, cert_files, object_name, group_name, api_key=
         xml_data = ET.tostring(root, encoding='unicode')
     
     # Update the address group
-    edit_url = f"{api_url}?type=config&action=edit&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name='{group_name}']&element={quote(xml_data)}"
+    edit_url = f"{api_url}?type=config&action=edit&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name={xpath_literal(group_name)}]&element={quote(xml_data)}"
     if cert_files:
         response = requests.post(edit_url, cert=cert_files, verify=tls_verify(), timeout=10)
     else:
@@ -278,7 +293,7 @@ def update_or_create_object(host, cert_files, object_name, value, api_key=None):
         return False
     
     xml_data = f"""
-    <entry name='{object_name}'>
+    <entry name={quoteattr(object_name)}>
         <{address_type}>{value}</{address_type}>
     </entry>
     """
@@ -286,7 +301,7 @@ def update_or_create_object(host, cert_files, object_name, value, api_key=None):
     # Check if the object exists to decide between update or create
     if check_object_exists(host, cert_files, object_name, api_key):
         # Update existing object
-        url = f"{api_url}?type=config&action=edit&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name='{object_name}']&element={quote(xml_data)}"
+        url = f"{api_url}?type=config&action=edit&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name={xpath_literal(object_name)}]&element={quote(xml_data)}"
         action = "updated"
     else:
         # Create new object
@@ -373,7 +388,7 @@ def delete_batch_objects(host, cert_files, object_names, usage_dict, api_key=Non
             continue
         
         # Delete the object
-        url = f"{api_url}?type=config&action=delete&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name='{name}']"
+        url = f"{api_url}?type=config&action=delete&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name={xpath_literal(name)}]"
         try:
             if cert_files:
                 response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
@@ -509,10 +524,24 @@ def batch_create_or_update_objects(host, cert_files, batch_file, api_key=None):
 def restore_running_config(host, cert_files, config_file, api_key=None):
     api_url = f"https://{host}/api/"
     
+    filename = secure_filename(config_file.filename or "")
+    if not filename.lower().endswith(".xml"):
+        append_output("Configuration file must be an .xml file with a plain name.")
+        return None
+    data = config_file.read()
+    try:
+        root = safe_fromstring(data)  # defusedxml: rejects entity-expansion / external-entity XML
+    except Exception:
+        append_output("Uploaded file is not safe, well-formed XML. Nothing was sent to the firewall.")
+        return None
+    if root.tag != "config":
+        append_output("Uploaded XML is not a PAN-OS configuration (<config> root expected).")
+        return None
+    
     # Step 1: Import the configuration file to the firewall
     append_output("\nStep 1: Importing the configuration file to the firewall...")
     upload_url = f"{api_url}?type=import&category=configuration"
-    files = {'file': config_file}
+    files = {'file': (filename, data, "application/xml")}
     try:
         if cert_files:
             response = requests.post(upload_url, files=files, cert=cert_files, verify=tls_verify(), timeout=30)
@@ -520,14 +549,13 @@ def restore_running_config(host, cert_files, config_file, api_key=None):
             headers = {"X-PAN-KEY": api_key}
             response = requests.post(upload_url, headers=headers, files=files, verify=tls_verify(), timeout=30)
         response.raise_for_status()
-        append_output(f"Successfully imported configuration file to the firewall.")
+        append_output("Successfully imported configuration file to the firewall.")
     except requests.RequestException as e:
         append_output(f"Failed to import configuration file: {e}")
         return None
     
     # Step 2: Load the imported configuration into the candidate configuration
     append_output("\nStep 2: Loading the imported configuration into the candidate configuration...")
-    filename = config_file.filename
     load_url = f"{api_url}?type=op&cmd=<load><config><from>{filename}</from></config></load>"
     try:
         if cert_files:
@@ -635,7 +663,7 @@ def get_firewall_hostname(host, cert_files, api_key=None):
             headers = {"X-PAN-KEY": api_key}
             response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
-        root = ET.fromstring(response.text)
+        root = safe_fromstring(response.text)
         hostname = root.find(".//hostname").text
         return hostname
     except (requests.RequestException, AttributeError) as e:
@@ -703,8 +731,8 @@ def index():
         cert_files = None
         api_key = None
         if cert_file and key_file and cert_file.filename and key_file.filename:
-            cert_path = os.path.join("uploads", cert_file.filename)
-            key_path = os.path.join("uploads", key_file.filename)
+            cert_path = os.path.join("uploads", secure_filename(cert_file.filename) or "client_cert.pem")
+            key_path = os.path.join("uploads", secure_filename(key_file.filename) or "client_key.pem")
             if not os.path.exists("uploads"):
                 os.makedirs("uploads")
             cert_file.save(cert_path)
@@ -787,4 +815,4 @@ if __name__ == "__main__":
     parser.add_argument("--insecure", action="store_true",
                         help="Disable TLS certificate verification (lab only). Prefer NET_SCRIPTS_CA_BUNDLE.")
     configure_tls(insecure=parser.parse_args().insecure)
-    app.run(host=os.environ.get("FLASK_HOST", "127.0.0.1"), port=int(os.environ.get("FLASK_PORT", "5000")), debug=os.environ.get("FLASK_DEBUG") == "1")
+    app.run(host=os.environ.get("FLASK_HOST", "127.0.0.1"), port=int(os.environ.get("FLASK_PORT", "5000")), debug=os.environ.get("FLASK_DEBUG", "0") == "1")

@@ -7,6 +7,7 @@
 import os
 import sys
 import xml.etree.ElementTree as ET
+from defusedxml.ElementTree import fromstring as safe_fromstring
 from urllib.parse import quote
 from xml.sax.saxutils import escape
 
@@ -45,6 +46,22 @@ def configure_tls(insecure=False, log=print):
 def tls_verify():
     """Value to pass as requests' verify= argument."""
     return _verify
+
+
+def xpath_literal(value):
+    """Quote a string for use as an XPath literal, e.g. entry[@name=<this>].
+
+    Uses '...' or "..." when possible; names containing both quote types are
+    built with concat(). Prevents names with apostrophes from breaking (or
+    rewriting) the XPath.
+    """
+    value = str(value)
+    if "'" not in value:
+        return f"'{value}'"
+    if '"' not in value:
+        return f'"{value}"'
+    parts = value.split("'")
+    return "concat(" + ", \"'\", ".join(f"'{p}'" for p in parts) + ")"
 
 
 def partial_commit_cmd(admin):
@@ -113,10 +130,10 @@ def remove_object_from_rule(host, cert_files, api_key, rule_type, rule_name, obj
     False when the rule was skipped (a field would become empty) or an error occurred.
     """
     api_url = f"https://{host}/api/"
-    xpath = f"{RULEBASE_XPATH[rule_type]}/entry[@name='{rule_name}']"
+    xpath = f"{RULEBASE_XPATH[rule_type]}/entry[@name={xpath_literal(rule_name)}]"
     response = api_call("GET", f"{api_url}?type=config&action=get&xpath={quote(xpath)}",
                         cert_files, api_key)
-    entry = ET.fromstring(response.text).find(".//entry")
+    entry = safe_fromstring(response.text).find(".//entry")
     if entry is None:
         log(f"WARNING: {rule_type} rule '{rule_name}' not found; skipping.")
         return False
@@ -156,7 +173,7 @@ def commit_own_changes(host, cert_files, api_key, admin, confirm, log=print, tim
     except Exception as e:  # requests errors, bad admin, etc.
         log(f"Commit failed: {e}")
         return False
-    status = ET.fromstring(response.text).get("status") if response.text else None
+    status = safe_fromstring(response.text).get("status") if response.text else None
     if status not in (None, "success"):
         log(f"Commit failed: firewall returned status '{status}'.")
         return False
