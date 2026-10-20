@@ -8,11 +8,23 @@ import os
 import getpass
 import re
 import ipaddress
-import msvcrt
+try:
+    import msvcrt  # Windows console; the countdown falls back to a plain timer elsewhere
+except ImportError:
+    msvcrt = None
+import argparse
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+from panos_safety import (configure_tls, tls_verify, remove_object_from_rule,
+                          commit_own_changes)
+
+ADMIN_USER = None   # admin whose changes a partial commit includes
+DRY_RUN = False     # --dry-run: list changes, make no API writes
 import csv
 
 # Script version
-SCRIPT_VERSION = "1.5.19"
+SCRIPT_VERSION = "1.5.20"
 
 # Version History:
 # 1.0.0 - Initial version with object parsing in copyable format, version control added
@@ -59,6 +71,28 @@ SCRIPT_VERSION = "1.5.19"
 # 1.5.17 - Updated script filename versioning to reset to v1 each day and increment within the day, appending the current date in MMDDYYYY format, as per the specified requirements
 # 1.5.18 - Added functionality to pull the 'default' virtual router configuration via API and output it to a CSV file for detailed analysis
 # 1.5.19 - Fixed SyntaxError in main() function by completing the try-except block and ensuring proper function call syntax
+# 1.5.20 - Safety fixes: TLS verification on by default (--insecure / NET_SCRIPTS_* env), --dry-run, backups never commit, commits are partial (own admin only) after typed confirmation, deleting an object removes it from rules instead of deleting rules, Ctrl+C during the exit countdown returns to the menu, keygen uses POST
+
+# Ask the operator to type 'commit' before a partial commit of their own changes
+def confirm_partial_commit(admin):
+    try:
+        answer = input(f"\nCommit ONLY changes made by admin '{admin}' (partial commit)? Type 'commit' to confirm: ").strip()
+    except KeyboardInterrupt:
+        print("\nCommit cancelled.")
+        return False
+    return answer.lower() == "commit"
+
+def commit_my_changes(host, cert_files, api_key=None):
+    global ADMIN_USER
+    if DRY_RUN:
+        print("[dry-run] no commit.")
+        return False
+    if not ADMIN_USER:
+        try:
+            ADMIN_USER = input("\nAdmin username whose changes should be committed (blank to skip): ").strip() or None
+        except KeyboardInterrupt:
+            return False
+    return commit_own_changes(host, cert_files, api_key, ADMIN_USER, confirm_partial_commit)
 
 # Load last accessible firewall from cache
 def load_cached_firewall():
@@ -163,9 +197,14 @@ def get_certificate_files():
 # Generate API key using deprecated method (fallback)
 def get_api_key(host, username, password):
     api_url = f"https://{host}/api/"
-    url = f"{api_url}?type=keygen&user={quote(username)}&password={quote(password)}"
-    response = requests.get(url, verify=False, timeout=10)
-    response.raise_for_status()
+    # POST keeps the password out of the URL (and out of logs and error messages).
+    try:
+        response = requests.post(api_url, data={"type": "keygen", "user": username, "password": password},
+                                 verify=tls_verify(), timeout=10)
+        response.raise_for_status()
+    except requests.RequestException as e:
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        raise requests.RequestException(f"API key request failed ({type(e).__name__}, HTTP {status})") from None
     root = ET.fromstring(response.text)
     key = root.find(".//key").text
     return key, api_url
@@ -203,10 +242,10 @@ def check_object_exists(host, cert_files, object_name, api_key=None):
     url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name='{object_name}']"
     
     if cert_files:
-        response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+        response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
     else:
         headers = {"X-PAN-KEY": api_key}
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
     
     response.raise_for_status()
     root = ET.fromstring(response.text)
@@ -218,10 +257,10 @@ def check_group_exists(host, cert_files, group_name, api_key=None):
     url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name='{group_name}']"
     
     if cert_files:
-        response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+        response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
     else:
         headers = {"X-PAN-KEY": api_key}
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
     
     response.raise_for_status()
     root = ET.fromstring(response.text)
@@ -240,10 +279,10 @@ def check_object_usage(host, cert_files, object_name, api_key=None):
     url_policies = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/security/rules"
     try:
         if cert_files:
-            response = requests.get(url_policies, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url_policies, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url_policies, headers=headers, verify=False, timeout=10)
+            response = requests.get(url_policies, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
         root = ET.fromstring(response.text)
         for rule in root.findall(".//entry"):
@@ -258,10 +297,10 @@ def check_object_usage(host, cert_files, object_name, api_key=None):
     url_nat = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/nat/rules"
     try:
         if cert_files:
-            response = requests.get(url_nat, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url_nat, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url_nat, headers=headers, verify=False, timeout=10)
+            response = requests.get(url_nat, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
         root = ET.fromstring(response.text)
         for rule in root.findall(".//entry"):
@@ -276,10 +315,10 @@ def check_object_usage(host, cert_files, object_name, api_key=None):
     url_groups = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group"
     try:
         if cert_files:
-            response = requests.get(url_groups, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url_groups, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url_groups, headers=headers, verify=False, timeout=10)
+            response = requests.get(url_groups, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
         root = ET.fromstring(response.text)
         for group in root.findall(".//entry"):
@@ -298,10 +337,10 @@ def remove_object_from_group(host, cert_files, object_name, group_name, api_key=
     url = f"{api_url}?type=config&action=get&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name='{group_name}']"
     
     if cert_files:
-        response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+        response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
     else:
         headers = {"X-PAN-KEY": api_key}
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
+        response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
     
     response.raise_for_status()
     root = ET.fromstring(response.text)
@@ -331,37 +370,20 @@ def remove_object_from_group(host, cert_files, object_name, group_name, api_key=
     else:
         xml_data = ET.tostring(root, encoding='unicode')
     
+    if DRY_RUN:
+        print(f"[dry-run] would remove '{object_name}' from address group '{group_name}'")
+        return True
+    
     # Update the address group
     edit_url = f"{api_url}?type=config&action=edit&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address-group/entry[@name='{group_name}']&element={quote(xml_data)}"
     if cert_files:
-        response = requests.post(edit_url, cert=cert_files, verify=False, timeout=10)
+        response = requests.post(edit_url, cert=cert_files, verify=tls_verify(), timeout=10)
     else:
         headers = {"X-PAN-KEY": api_key}
-        response = requests.post(edit_url, headers=headers, verify=False, timeout=10)
+        response = requests.post(edit_url, headers=headers, verify=tls_verify(), timeout=10)
     
     response.raise_for_status()
     print(f"Removed '{object_name}' from address group '{group_name}'")
-    return True
-
-# Delete a security policy or NAT rule
-def delete_policy(host, cert_files, policy_type, policy_name, api_key=None):
-    api_url = f"https://{host}/api/"
-    if policy_type == "security":
-        xpath = f"/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/security/rules/entry[@name='{policy_name}']"
-    elif policy_type == "nat":
-        xpath = f"/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/rulebase/nat/rules/entry[@name='{policy_name}']"
-    else:
-        return False
-    
-    url = f"{api_url}?type=config&action=delete&xpath={xpath}"
-    if cert_files:
-        response = requests.get(url, cert=cert_files, verify=False, timeout=10)
-    else:
-        headers = {"X-PAN-KEY": api_key}
-        response = requests.get(url, headers=headers, verify=False, timeout=10)
-    
-    response.raise_for_status()
-    print(f"Deleted {policy_type} policy '{policy_name}'")
     return True
 
 # Update or create an object
@@ -388,12 +410,15 @@ def update_or_create_object(host, cert_files, object_name, value, api_key=None):
         url = f"{api_url}?type=config&action=set&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address&element={quote(xml_data)}"
         action = "created"
     
+    if DRY_RUN:
+        print(f"[dry-run] object '{object_name}' would be {action} with value '{value}'")
+        return True
     try:
         if cert_files:
-            response = requests.post(url, cert=cert_files, verify=False, timeout=10)
+            response = requests.post(url, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.post(url, headers=headers, verify=False, timeout=10)
+            response = requests.post(url, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
         print(f"Object '{object_name}' {action} with value '{value}'")
         return True
@@ -459,24 +484,8 @@ def add_objects_or_groups(host, cert_files, api_key=None):
                 if done_response_lower in ['y', 'yes']:
                     # Commit changes if there are successful additions
                     if report["successful"]:
-                        api_url = f"https://{host}/api/"
-                        commit_url = f"{api_url}?type=commit&cmd=<commit></commit>"
-                        try:
-                            if cert_files:
-                                response = requests.post(commit_url, cert=cert_files, verify=False, timeout=30)
-                            else:
-                                headers = {"X-PAN-KEY": api_key}
-                                response = requests.post(commit_url, headers=headers, verify=False, timeout=30)
-                            response.raise_for_status()
-                            print("Changes committed successfully.")
-                        except requests.RequestException as e:
-                            print(f"Commit failed: {e}")
-                            failed_entries = []
-                            for entry in report["successful"]:
-                                name = entry.split("'")[1]
-                                failed_entries.append(f"'{name}' not committed due to commit failure: {str(e)}")
-                            report["failed"].extend(failed_entries)
-                            report["successful"] = []
+                        if not commit_my_changes(host, cert_files, api_key):
+                            report["failed"].append("Changes not committed; they remain in the candidate configuration.")
                     return report
                 elif done_response_lower in ['n', 'no']:
                     break  # Continue adding more objects
@@ -486,43 +495,56 @@ def add_objects_or_groups(host, cert_files, api_key=None):
                 print("\nOperation cancelled by user (Ctrl+C). Exiting.")
                 exit(0)
 
-# Delete specified address objects after listing affected policies
+# Delete address objects. Referencing rules are edited (object removed as a member), never deleted.
 def delete_batch_objects(host, cert_files, object_names, usage_dict, api_key=None):
     if not object_names:
-        return True, []
+        return [], []
     
     api_url = f"https://{host}/api/"
     successes = []
     failures = []
     
-    print(f"\nDeleting batch of {len(object_names)} objects...")
+    prefix = "[dry-run] " if DRY_RUN else ""
+    print(f"\n{prefix}Processing batch of {len(object_names)} objects...")
     for name in object_names:
+        if name not in usage_dict:
+            continue  # not found on firewall; already reported
         usage = usage_dict.get(name, {})
+        blocked = False
         # Remove from address groups
         for group_name in usage.get("address_groups", []):
             if not remove_object_from_group(host, cert_files, name, group_name, api_key):
-                failures.append(f"'{name}' not deleted due to failure removing from address group '{group_name}'")
-                continue
+                failures.append(f"'{name}' not deleted: could not remove it from address group '{group_name}'")
+                blocked = True
         
-        # Delete from policies
-        for policy_name in usage.get("security_policies", []):
-            if not delete_policy(host, cert_files, "security", policy_name, api_key):
-                failures.append(f"'{name}' not deleted due to failure deleting security policy '{policy_name}'")
-                continue
+        # Remove the object from referencing rules (the rules themselves are kept)
+        for rule_type, key in (("security", "security_policies"), ("nat", "nat_rules")):
+            for rule_name in usage.get(key, []):
+                try:
+                    ok = remove_object_from_rule(host, cert_files, api_key, rule_type, rule_name, name, dry_run=DRY_RUN)
+                except (requests.RequestException, ET.ParseError) as e:
+                    print(f"Failed to update {rule_type} rule '{rule_name}': {e}")
+                    ok = False
+                if not ok:
+                    failures.append(f"'{name}' not deleted: still referenced by {rule_type} rule '{rule_name}'")
+                    blocked = True
         
-        for policy_name in usage.get("nat_rules", []):
-            if not delete_policy(host, cert_files, "nat", policy_name, api_key):
-                failures.append(f"'{name}' not deleted due to failure deleting NAT policy '{policy_name}'")
-                continue
+        if blocked:
+            print(f"Skipping deletion of '{name}' because it is still referenced.")
+            continue
         
         # Delete the object
+        if DRY_RUN:
+            print(f"[dry-run] would delete address object '{name}'")
+            successes.append(f"'{name}' would be deleted (dry-run)")
+            continue
         url = f"{api_url}?type=config&action=delete&xpath=/config/devices/entry[@name='localhost.localdomain']/vsys/entry[@name='vsys1']/address/entry[@name='{name}']"
         try:
             if cert_files:
-                response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+                response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
             else:
                 headers = {"X-PAN-KEY": api_key}
-                response = requests.get(url, headers=headers, verify=False, timeout=10)
+                response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
             response.raise_for_status()
             successes.append(f"'{name}' deleted")
             print(f"Deleted '{name}'")
@@ -530,19 +552,9 @@ def delete_batch_objects(host, cert_files, object_names, usage_dict, api_key=Non
             failures.append(f"'{name}' not deleted due to error: {str(e)}")
             print(f"Failed to delete '{name}': {str(e)}")
     
-    if successes:
-        commit_url = f"{api_url}?type=commit&cmd=<commit></commit>"
-        try:
-            if cert_files:
-                commit_response = requests.post(commit_url, cert=cert_files, verify=False, timeout=10)
-            else:
-                headers = {"X-PAN-KEY": api_key}
-                commit_response = requests.post(commit_url, headers=headers, verify=False, timeout=10)
-            commit_response.raise_for_status()
-            print("Batch deletions committed successfully.")
-        except requests.RequestException as e:
-            print(f"Commit failed: {e}")
-            failures.extend([f"'{name}' deletion not committed due to commit failure: {str(e)}" for name in object_names if name in [entry.split("'")[1] for entry in successes]])
+    if successes and not DRY_RUN:
+        if not commit_my_changes(host, cert_files, api_key):
+            failures.append("Changes not committed; they remain in the candidate configuration.")
     
     return successes, failures
 
@@ -673,19 +685,8 @@ def replace_object_values(host, cert_files, api_key=None):
             report["failed"].append(f"'{name}' not updated due to error")
     
     if report["successful"]:
-        api_url = f"https://{host}/api/"
-        commit_url = f"{api_url}?type=commit&cmd=<commit></commit>"
-        try:
-            if cert_files:
-                commit_response = requests.post(commit_url, cert=cert_files, verify=False, timeout=10)
-            else:
-                headers = {"X-PAN-KEY": api_key}
-                commit_response = requests.post(commit_url, headers=headers, verify=False, timeout=10)
-            commit_response.raise_for_status()
-            print("Replacements committed successfully.")
-        except requests.RequestException as e:
-            print(f"Commit failed: {e}")
-            report["failed"].extend([f"'{name}' update not committed due to commit failure: {str(e)}" for name in objects_to_replace if name in [entry.split("'")[1] for entry in report["successful"]]])
+        if not commit_my_changes(host, cert_files, api_key):
+            report["failed"].append("Changes not committed; they remain in the candidate configuration.")
     
     return report
 
@@ -725,24 +726,8 @@ def batch_create_or_update_objects(host, cert_files, api_key=None):
     
     # Commit changes if there are successful operations
     if report["successful"]:
-        api_url = f"https://{host}/api/"
-        commit_url = f"{api_url}?type=commit&cmd=<commit></commit>"
-        try:
-            if cert_files:
-                commit_response = requests.post(commit_url, cert=cert_files, verify=False, timeout=30)
-            else:
-                headers = {"X-PAN-KEY": api_key}
-                commit_response = requests.post(commit_url, headers=headers, verify=False, timeout=30)
-            commit_response.raise_for_status()
-            print("Batch object creation/update committed successfully.")
-        except requests.RequestException as e:
-            print(f"Commit failed: {e}")
-            failed_entries = []
-            for entry in report["successful"]:
-                name = entry.split("'")[1]
-                failed_entries.append(f"'{name}' not committed due to commit failure: {str(e)}")
-            report["failed"].extend(failed_entries)
-            report["successful"] = []
+        if not commit_my_changes(host, cert_files, api_key):
+            report["failed"].append("Changes not committed; they remain in the candidate configuration.")
     
     return report
 
@@ -754,6 +739,9 @@ def restore_running_config(host, cert_files, api_key=None):
             print(f"Error: Configuration file '{config_file}' not found.")
             return None
         
+        if DRY_RUN:
+            print(f"[dry-run] would import and load '{config_file}' into the candidate configuration.")
+            return None
         api_url = f"https://{host}/api/"
         
         # Step 1: Import the configuration file to the firewall
@@ -762,10 +750,10 @@ def restore_running_config(host, cert_files, api_key=None):
         files = {'file': open(config_file, 'rb')}
         try:
             if cert_files:
-                response = requests.post(upload_url, files=files, cert=cert_files, verify=False, timeout=30)
+                response = requests.post(upload_url, files=files, cert=cert_files, verify=tls_verify(), timeout=30)
             else:
                 headers = {"X-PAN-KEY": api_key}
-                response = requests.post(upload_url, headers=headers, files=files, verify=False, timeout=30)
+                response = requests.post(upload_url, headers=headers, files=files, verify=tls_verify(), timeout=30)
             response.raise_for_status()
             print(f"Successfully imported configuration file '{config_file}' to the firewall.")
         except requests.RequestException as e:
@@ -780,30 +768,21 @@ def restore_running_config(host, cert_files, api_key=None):
         load_url = f"{api_url}?type=op&cmd=<load><config><from>{filename}</from></config></load>"
         try:
             if cert_files:
-                response = requests.get(load_url, cert=cert_files, verify=False, timeout=30)
+                response = requests.get(load_url, cert=cert_files, verify=tls_verify(), timeout=30)
             else:
                 headers = {"X-PAN-KEY": api_key}
-                response = requests.get(load_url, headers=headers, verify=False, timeout=30)
+                response = requests.get(load_url, headers=headers, verify=tls_verify(), timeout=30)
             response.raise_for_status()
             print(f"Successfully loaded configuration from '{filename}' into the candidate configuration.")
         except requests.RequestException as e:
             print(f"Failed to load configuration: {e}")
             return None
         
-        # Step 3: Commit the loaded configuration to the live (active) configuration
-        print("\nStep 3: Committing the loaded configuration to the live configuration...")
-        commit_url = f"{api_url}?type=commit&cmd=<commit></commit>"
-        try:
-            if cert_files:
-                response = requests.post(commit_url, cert=cert_files, verify=False, timeout=30)
-            else:
-                headers = {"X-PAN-KEY": api_key}
-                response = requests.post(commit_url, headers=headers, verify=False, timeout=30)
-            response.raise_for_status()
-            print("Configuration successfully committed to the live configuration.")
-        except requests.RequestException as e:
-            print(f"Commit failed: {e}")
-            return None
+        # Step 3: Optionally commit (partial, your admin only) after explicit confirmation
+        print("\nStep 3: Commit is optional and limited to your own admin changes.")
+        if not commit_my_changes(host, cert_files, api_key):
+            print("Restored config is loaded in the candidate configuration but NOT committed.")
+            return {"successful": [f"Loaded configuration from '{filename}' into the candidate configuration (not committed)"], "failed": []}
         
         return {"successful": [f"Restored and loaded configuration from '{filename}' into live configuration"], "failed": []}
 
@@ -827,10 +806,10 @@ def export_firewall_policies(host, cert_files, api_key=None, timestamp=None):
     # Fetch the policies
     try:
         if cert_files:
-            response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url, headers=headers, verify=False, timeout=10)
+            response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
     except requests.RequestException as e:
         print(f"Failed to retrieve firewall policies: {e}")
@@ -934,10 +913,10 @@ def export_static_routes(host, cert_files, api_key=None, timestamp=None):
     # Fetch the static routes
     try:
         if cert_files:
-            response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url, headers=headers, verify=False, timeout=10)
+            response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
     except requests.RequestException as e:
         print(f"Failed to retrieve static routes: {e}")
@@ -1001,10 +980,10 @@ def export_dynamic_routing(host, cert_files, api_key=None, timestamp=None):
     # Fetch the dynamic routing protocols
     try:
         if cert_files:
-            response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url, headers=headers, verify=False, timeout=10)
+            response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
     except requests.RequestException as e:
         print(f"Failed to retrieve dynamic routing configurations: {e}")
@@ -1080,10 +1059,10 @@ def export_default_virtual_router_config(host, cert_files, api_key=None):
     # Fetch the virtual router configuration
     try:
         if cert_files:
-            response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url, headers=headers, verify=False, timeout=10)
+            response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
     except requests.RequestException as e:
         print(f"Failed to retrieve 'default' virtual router configuration: {e}")
@@ -1283,26 +1262,29 @@ def confirm_exit():
             print("\nOperation cancelled by user (Ctrl+C). Exiting.")
             exit(0)
 
-# Countdown timer for exit
-def exit_countdown():
-    total_seconds = 10 * 60  # 10 minutes in seconds
-    print("\nStarting 10-minute countdown. Press Enter to interrupt and continue...")
-    start_time = time.time()
-    while total_seconds > 0:
-        if msvcrt.kbhit():
-            char = msvcrt.getch().decode('utf-8')
-            if char == '\r':  # Enter key
-                print("\nCountdown interrupted. Returning to menu.")
-                return
-        elapsed_time = time.time() - start_time
-        remaining_seconds = max(0, 10 * 60 - int(elapsed_time))
-        minutes = remaining_seconds // 60
-        seconds = remaining_seconds % 60
-        print(f"\rExiting in {minutes:02d}:{seconds:02d}...", end='', flush=True)
-        time.sleep(1)
-        total_seconds -= 1
-    print("\nExiting now.")
-    exit(0)
+# Countdown timer for exit.
+# Returns True if the operator interrupted it (Enter or Ctrl+C): go back to the menu.
+# Returns False when the countdown finishes: the caller exits.
+def exit_countdown(total_seconds=10 * 60, sleep=time.sleep, clock=time.time):
+    print(f"\nStarting {total_seconds // 60}-minute countdown. Press Enter or Ctrl+C to return to the menu...")
+    start_time = clock()
+    try:
+        while True:
+            if msvcrt is not None and msvcrt.kbhit():
+                char = msvcrt.getch().decode('utf-8', errors='ignore')
+                if char == '\r':  # Enter key
+                    print("\nCountdown interrupted. Returning to menu.")
+                    return True
+            remaining_seconds = max(0, total_seconds - int(clock() - start_time))
+            if remaining_seconds <= 0:
+                break
+            minutes, seconds = divmod(remaining_seconds, 60)
+            print(f"\rExiting in {minutes:02d}:{seconds:02d}...", end='', flush=True)
+            sleep(1)
+    except KeyboardInterrupt:
+        print("\nCountdown interrupted (Ctrl+C). Returning to menu.")
+        return True
+    return False
 
 # Display menu and get user selection (updated with new option)
 def display_menu():
@@ -1372,10 +1354,10 @@ def get_firewall_hostname(host, cert_files, api_key=None):
     url = f"{api_url}?type=op&cmd=<show><system><info></info></system></show>"
     try:
         if cert_files:
-            response = requests.get(url, cert=cert_files, verify=False, timeout=10)
+            response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=10)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url, headers=headers, verify=False, timeout=10)
+            response = requests.get(url, headers=headers, verify=tls_verify(), timeout=10)
         response.raise_for_status()
         root = ET.fromstring(response.text)
         hostname = root.find(".//hostname").text
@@ -1403,33 +1385,23 @@ def download_running_config(host, cert_files, api_key=None):
     url = f"{api_url}?type=export&category=configuration"
     try:
         if cert_files:
-            response = requests.get(url, cert=cert_files, verify=False, timeout=30)
+            response = requests.get(url, cert=cert_files, verify=tls_verify(), timeout=30)
         else:
             headers = {"X-PAN-KEY": api_key}
-            response = requests.get(url, headers=headers, verify=False, timeout=30)
+            response = requests.get(url, headers=headers, verify=tls_verify(), timeout=30)
         response.raise_for_status()
         with open(base_filename, "wb") as f:
             f.write(response.content)
         print(f"Running configuration downloaded successfully as '{base_filename}'.")
         
-        # Perform a commit after successful download
-        commit_url = f"{api_url}?type=commit&cmd=<commit></commit>"
-        try:
-            if cert_files:
-                commit_response = requests.post(commit_url, cert=cert_files, verify=False, timeout=30)
-            else:
-                headers = {"X-PAN-KEY": api_key}
-                commit_response = requests.post(commit_url, headers=headers, verify=False, timeout=30)
-            commit_response.raise_for_status()
-            print("Configuration committed successfully after backup.")
-        except requests.RequestException as e:
-            print(f"Warning: Commit after backup failed: {e}. Proceeding without committing.")
+        print("Backup only: nothing was committed.")
     
     except requests.RequestException as e:
         print(f"Failed to download running configuration: {e}")
 
 # Main execution
 def main():
+    global ADMIN_USER
     try:
         print(f"Script Version: {SCRIPT_VERSION}")
         host = get_host()
@@ -1441,6 +1413,7 @@ def main():
             # Fallback to deprecated method
             username, password = get_credentials()
             api_key, _ = get_api_key(host, username, password)
+            ADMIN_USER = username
         
         print(f"Connected to device at {host}")
 
@@ -1474,10 +1447,10 @@ def main():
             
             elif choice == 6:  # Exit
                 print("\nStarting 10-minute countdown before exiting...")
-                restored = exit_countdown()
-                if not restored:
-                    print("Exiting now.")
-                    exit(0)
+                if exit_countdown():
+                    continue  # interrupted: back to the menu
+                print("\nExiting now.")
+                exit(0)
             
             elif choice == 7:  # Create or update objects in batch
                 batch_report = batch_create_or_update_objects(host, cert_files, api_key)
@@ -1503,6 +1476,18 @@ def main():
     except Exception as e:
         print(f"Unexpected Error: {e}")
 
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description="PAN-OS config change CLI")
+    parser.add_argument("--insecure", action="store_true",
+                        help="Disable TLS certificate verification (lab only). Prefer NET_SCRIPTS_CA_BUNDLE.")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Show what would change; make no configuration writes or commits.")
+    return parser.parse_args(argv)
+
 if __name__ == "__main__":
-    requests.packages.urllib3.disable_warnings()
+    args = parse_args()
+    DRY_RUN = args.dry_run
+    if DRY_RUN:
+        print("DRY-RUN mode: no configuration changes or commits will be made.")
+    configure_tls(insecure=args.insecure)
     main()

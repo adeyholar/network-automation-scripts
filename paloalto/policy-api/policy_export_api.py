@@ -6,6 +6,13 @@ from typing import Dict
 import getpass
 import sys
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "common"))
+from panos_safety import configure_tls, tls_verify
+
+# TLS verification is on by default. Under uvicorn, configure it with
+# NET_SCRIPTS_VERIFY_TLS=false (lab only) or NET_SCRIPTS_CA_BUNDLE=/path/to/ca.pem.
+configure_tls()
+
 app = FastAPI()
 
 # Interactively prompt for firewall details
@@ -20,29 +27,29 @@ except Exception as e:
 
 def get_api_key() -> str:
     print(f"Attempting to authenticate to {FIREWALL_IP}")
-    url = f"https://{FIREWALL_IP}/api/?type=keygen"
-    params = {"user": USERNAME, "password": PASSWORD}
+    url = f"https://{FIREWALL_IP}/api/"
+    data = {"type": "keygen", "user": USERNAME, "password": PASSWORD}
     
     try:
-        response = requests.get(url, params=params, verify=False, timeout=10)
+        # POST keeps the password out of the URL; the response (which holds the key) is never printed.
+        response = requests.post(url, data=data, verify=tls_verify(), timeout=10)
         response.raise_for_status()
-        print(f"Authentication response: {response.text}")
-        
         from xml.etree import ElementTree
         root = ElementTree.fromstring(response.text)
         key = root.find(".//key")
         if key is None:
-            print("API key not found in response")
+            print("Authentication failed: no API key in the firewall response")
             raise HTTPException(status_code=401, detail="Failed to retrieve API key")
-        print("API key retrieved successfully")
+        print("Authentication succeeded (API key not shown)")
         return key.text
     except requests.RequestException as e:
-        print(f"Authentication failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Authentication error: {str(e)}")
+        status = getattr(getattr(e, "response", None), "status_code", None)
+        print(f"Authentication failed ({type(e).__name__}, HTTP {status})")
+        raise HTTPException(status_code=500, detail="Authentication to the firewall failed")
 
 @app.get("/")
 async def root():
-    return {"message": "Welcome to the Palo Alto API. Use /apply-policy/, /undo-policy/, or /export-security-policies/ endpoints. Docs at /docs."}
+    return {"message": "Welcome to the Palo Alto API. Use /export-security-policies/, /apply-policy/, or /clear-local-policy-copy/ endpoints. Docs at /docs."}
 
 @app.post("/export-security-policies/")
 async def export_security_policies(output_file_path: str) -> Dict:
@@ -82,7 +89,7 @@ async def export_security_policies(output_file_path: str) -> Dict:
         
         for params in param_sets:
             print(f"Requesting security policies from: {url} with params {params}")
-            response = requests.get(url, headers=headers, params=params, verify=False)
+            response = requests.get(url, headers=headers, params=params, verify=tls_verify(), timeout=30)
             if response.status_code == 200:
                 policies = response.json()
                 print(f"Security policies retrieved via REST API: {policies}")
@@ -111,7 +118,7 @@ async def export_security_policies(output_file_path: str) -> Dict:
                 url = f"https://{FIREWALL_IP}/api/?type=config&action=get&xpath={xpath}"
                 headers = {"X-PAN-KEY": api_key}
                 print(f"Trying XPath: {xpath}")
-                response = requests.get(url, headers=headers, verify=False)
+                response = requests.get(url, headers=headers, verify=tls_verify(), timeout=30)
                 response.raise_for_status()
                 print(f"XML API response for XPath {xpath}: {response.text}")
                 
@@ -137,7 +144,7 @@ async def export_security_policies(output_file_path: str) -> Dict:
             try:
                 url = f"https://{FIREWALL_IP}/api/?type=config&action=get"
                 headers = {"X-PAN-KEY": api_key}
-                response = requests.get(url, headers=headers, verify=False)
+                response = requests.get(url, headers=headers, verify=tls_verify(), timeout=30)
                 response.raise_for_status()
                 print(f"Full XML API response: {response.text}")
                 
@@ -209,7 +216,7 @@ async def apply_policy(config_file_path: str, target_file_path: str) -> Dict:
             ]
         }
         print(f"Sending policy to firewall: {firewall_policy}")
-        response = requests.post(url, headers=headers, params=params, json=firewall_policy, verify=False)
+        response = requests.post(url, headers=headers, params=params, json=firewall_policy, verify=tls_verify(), timeout=30)
         response.raise_for_status()
         print(f"Firewall response: {response.text}")
         
@@ -225,29 +232,23 @@ async def apply_policy(config_file_path: str, target_file_path: str) -> Dict:
         print(f"Error saving policy: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error saving policy: {str(e)}")
 
-@app.post("/undo-policy/")
-async def undo_policy(target_file_path: str) -> Dict:
-    # Normalize file path for Windows compatibility
+@app.post("/clear-local-policy-copy/")
+async def clear_local_policy_copy(target_file_path: str) -> Dict:
+    """Empty the local JSON copy written by /apply-policy/.
+
+    This does NOT change the firewall. To remove a rule that /apply-policy/ created,
+    delete it on the firewall (or restore a config backup) and commit there.
+    """
     target_file_path = os.path.normpath(target_file_path)
-    
-    print(f"Undoing policy for {target_file_path}")
+    print(f"Clearing local policy copy {target_file_path}")
     if not os.path.exists(target_file_path):
-        print(f"Target file {target_file_path} not found")
         raise HTTPException(status_code=404, detail="Target file not found")
-
-    try:
-        api_key = get_api_key()
-    except HTTPException as e:
-        print(f"Authentication error: {str(e)}")
-        raise e
-
     try:
         with open(target_file_path, 'w') as target_file:
             target_file.write('')
-        print(f"Target file {target_file_path} cleared")
-        return {"message": f"Policy undone for {target_file_path}"}
+        return {"message": f"Local copy {target_file_path} cleared. The firewall was not changed."}
     except Exception as e:
-        print(f"Error undoing policy: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error undoing policy: {str(e)}")
+        print(f"Error clearing local copy: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error clearing local copy: {str(e)}")
 
 # To run the API: `uvicorn policy_export_api:app --reload`
