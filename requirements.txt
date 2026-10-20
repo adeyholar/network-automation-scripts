@@ -1,13 +1,15 @@
-# Palo Alto PAN-OS tools
-requests>=2.31
-flask>=3.0            # paloalto/config-change-webapp
-fastapi>=0.110        # paloalto/policy-api
-uvicorn>=0.29         # paloalto/policy-api
-pydantic>=2.0         # paloalto/policy-api (FastAPI dependency)
-pan-os-python>=1.12   # paloalto/address-object-updater
+# Pinned versions (tested with Python 3.11 and 3.13)
+requests==2.34.2
+defusedxml==0.7.1      # safe XML parsing (webapp, CLI, policy-api)
+flask==3.1.3           # paloalto/config-change-webapp
+fastapi==0.152.0       # paloalto/policy-api
+uvicorn==0.54.0        # paloalto/policy-api
+pydantic==2.14.1       # paloalto/policy-api (FastAPI dependency)
+httpx==0.28.1          # tests (FastAPI TestClient)
+pan-os-python==1.13.1  # paloalto/address-object-updater
 
 # VeloCloud
-tabulate>=0.9
+tabulate==0.10.0
 
 # FortiGate runbook generator
-python-docx>=1.1
+python-docx==1.2.0

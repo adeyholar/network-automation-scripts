@@ -2,7 +2,7 @@
 import importlib.util
 import os
 import sys
-import types
+import json
 import unittest
 import xml.etree.ElementTree as ET
 from unittest import mock
@@ -149,6 +149,13 @@ class CLI(unittest.TestCase):
         post.assert_not_called()
         self.assertFalse(any("commit" in u for u in urls))
 
+    def setUp(self):
+        self.p1 = mock.patch.object(self.cli, "msvcrt", None); self.p1.start()
+        self.p2 = mock.patch.object(self.cli, "_stdin_line_ready", lambda: False); self.p2.start()
+
+    def tearDown(self):
+        self.p1.stop(); self.p2.stop()
+
     def test_countdown_ctrl_c_returns_to_menu(self):
         def sleep(_):
             raise KeyboardInterrupt
@@ -161,27 +168,137 @@ class CLI(unittest.TestCase):
             self.assertFalse(self.cli.exit_countdown(total_seconds=3, sleep=lambda _: None, clock=lambda: next(t)))
 
 
+class XPath(unittest.TestCase):
+    def test_plain(self):
+        self.assertEqual(panos_safety.xpath_literal("web-01"), "'web-01'")
+
+    def test_apostrophe(self):
+        self.assertEqual(panos_safety.xpath_literal("bob's host"), '"bob\'s host"')
+
+    def test_both_quotes(self):
+        lit = panos_safety.xpath_literal("a'b\"c")
+        self.assertEqual(lit, "concat('a', \"'\", 'b\"c')")
+
+    def test_used_in_rule_xpath(self):
+        calls = []
+        def req(method, url, **kw):
+            calls.append(url); return fake_response(RULE_OK)
+        with mock.patch("requests.request", side_effect=req):
+            panos_safety.remove_object_from_rule("fw.example.com", None, "k", "security", "it's", "obj-a", log=lambda *_: None)
+        from urllib.parse import unquote
+        self.assertIn('[@name="it\'s"]', unquote(calls[0]))
+
+
+TOKEN = "test-token-not-a-secret"
+GOOD_POLICY = {"policy": {"name": "allow-web", "from": ["trust"], "to": ["untrust"], "source": ["net-a"],
+                          "destination": ["net-b"], "application": ["web-browsing"],
+                          "service": ["application-default"], "action": "allow"}}
+CONFIG_TEXT = "<config-secret-marker/>"
+
+
 class PolicyAPI(unittest.TestCase):
-    def test_keygen_response_not_printed(self):
-        fake_fastapi = types.ModuleType("fastapi")
-        class HTTPException(Exception):
-            def __init__(self, status_code=None, detail=None): super().__init__(detail)
-        class FastAPI:
-            def __getattr__(self, name): return lambda *a, **k: (lambda f: f)
-        fake_fastapi.FastAPI = FastAPI; fake_fastapi.HTTPException = HTTPException
-        env = {"PANOS_HOST": "192.0.2.1", "PANOS_USERNAME": "u", "PANOS_PASSWORD": "p"}
+    def setUp(self):
+        import tempfile
+        from fastapi.testclient import TestClient
+        self.tmp = tempfile.mkdtemp()
+        self.env = mock.patch.dict(os.environ, {"PANOS_HOST": "192.0.2.1", "PANOS_USERNAME": "u", "PANOS_PASSWORD": "p",
+                                                "NET_SCRIPTS_WORK_DIR": self.tmp, "NET_SCRIPTS_API_TOKEN": TOKEN})
+        self.env.start()
         path = os.path.join(ROOT, "paloalto", "policy-api", "policy_export_api.py")
-        with mock.patch.dict(sys.modules, {"fastapi": fake_fastapi}), mock.patch.dict(os.environ, env), \
-             mock.patch("builtins.print"):
-            spec = importlib.util.spec_from_file_location("pea", path)
-            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
-        secret = "SECRETKEY123"
+        spec = importlib.util.spec_from_file_location("pea", path)
+        self.mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(self.mod)
+        self.client = TestClient(self.mod.app)
+        self.h = {"X-API-Token": TOKEN}
+
+    def tearDown(self):
+        self.env.stop()
+
+    def write(self, name, obj):
+        with open(os.path.join(self.tmp, name), "w") as f:
+            json.dump(obj, f)
+
+    def test_token_required(self):
+        self.assertEqual(self.client.get("/").status_code, 401)
+        self.assertEqual(self.client.get("/", headers={"X-API-Token": "wrong"}).status_code, 401)
+        self.assertEqual(self.client.get("/", headers=self.h).status_code, 200)
+        with mock.patch.dict(os.environ, {"NET_SCRIPTS_API_TOKEN": ""}):
+            self.assertEqual(self.client.get("/", headers=self.h).status_code, 503)
+
+    def test_no_prompt_at_import(self):
+        self.assertFalse(hasattr(self.mod, "FIREWALL_IP"))
+
+    def test_path_restriction(self):
+        for bad in ("../escape.json", "/etc/passwd", "a/../../x.json"):
+            r = self.client.post("/clear-local-policy-copy/", params={"target_file_path": bad}, headers=self.h)
+            self.assertEqual(r.status_code, 400, bad)
+        r = self.client.post("/export-security-policies/", params={"output_file_path": "../x.json"}, headers=self.h)
+        self.assertEqual(r.status_code, 400)
+        self.write("ok.json", {})
+        r = self.client.post("/clear-local-policy-copy/", params={"target_file_path": "ok.json"}, headers=self.h)
+        self.assertEqual(r.status_code, 200)
+
+    def apply(self, policy):
+        self.write("in.json", policy)
+        return self.client.post("/apply-policy/", params={"config_file_path": "in.json", "target_file_path": "out.json"},
+                                headers=self.h)
+
+    def test_apply_validation_fails_closed(self):
+        with mock.patch("requests.post") as post:
+            for field in ("name", "from", "to", "source", "destination", "application", "service", "action"):
+                bad = json.loads(json.dumps(GOOD_POLICY)); del bad["policy"][field]
+                self.assertEqual(self.apply(bad).status_code, 400, field)
+            bad = json.loads(json.dumps(GOOD_POLICY)); bad["policy"]["action"] = "reset-both"
+            self.assertEqual(self.apply(bad).status_code, 400)
+            anyany = json.loads(json.dumps(GOOD_POLICY)); anyany["policy"].update(source=["any"], destination=["any"])
+            self.assertEqual(self.apply(anyany).status_code, 400)
+            post.assert_not_called()
+
+    def test_apply_ok_and_nothing_printed(self):
         printed = []
-        with mock.patch("requests.post", return_value=fake_response(f"<response><result><key>{secret}</key></result></response>")), \
+        def post(url, **kw):
+            if kw.get("data", {}).get("type") == "keygen":
+                return fake_response("<response><result><key>SECRETKEY123</key></result></response>")
+            return fake_response(CONFIG_TEXT)
+        with mock.patch("requests.post", side_effect=post), \
              mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
-            self.assertEqual(mod.get_api_key(), secret)
-        self.assertFalse(any(secret in p for p in printed))
-        self.assertFalse(hasattr(mod, "undo_policy"))
+            r = self.apply(GOOD_POLICY)
+        self.assertEqual(r.status_code, 200, r.text)
+        out = "\n".join(printed)
+        for secret in ("SECRETKEY123", "config-secret-marker", "net-a", "web-browsing"):
+            self.assertNotIn(secret, out)
+
+    def test_export_prints_counts_only(self):
+        xml = ("<response><result><rules><entry name='r1'><source><member>net-a</member></source></entry>"
+               "</rules></result></response>")
+        printed = []
+        def get(url, **kw):
+            r = fake_response(xml if "/api/" in url else "{}"); r.status_code = 200 if "/api/" in url else 404
+            r.json = lambda: {}
+            return r
+        with mock.patch("requests.post", return_value=fake_response("<response><result><key>K9</key></result></response>")), \
+             mock.patch("requests.get", side_effect=get), \
+             mock.patch("builtins.print", side_effect=lambda *a, **k: printed.append(" ".join(map(str, a)))):
+            r = self.client.post("/export-security-policies/", params={"output_file_path": "rules.json"}, headers=self.h)
+        self.assertEqual(r.status_code, 200, r.text)
+        out = "\n".join(printed)
+        self.assertNotIn("net-a", out); self.assertNotIn("K9", out); self.assertIn("1", out)
+
+
+class WebApp(unittest.TestCase):
+    def test_settings(self):
+        path = os.path.join(ROOT, "paloalto", "config-change-webapp", "app.py")
+        with mock.patch.dict(os.environ, {"FLASK_SECRET_KEY": ""}), mock.patch("builtins.print"):
+            spec = importlib.util.spec_from_file_location("webapp", path)
+            mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+        self.assertTrue(mod.app.secret_key and len(mod.app.secret_key) >= 32)
+        self.assertTrue(mod.app.config["MAX_CONTENT_LENGTH"])
+        self.assertFalse(mod.app.debug)
+
+    def test_rejects_entity_bomb(self):
+        from defusedxml import EntitiesForbidden
+        bomb = '<?xml version="1.0"?><!DOCTYPE x [<!ENTITY a "aaaa">]><config>&a;</config>'
+        with self.assertRaises(EntitiesForbidden):
+            panos_safety.safe_fromstring(bomb)
 
 
 if __name__ == "__main__":
