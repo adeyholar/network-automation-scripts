@@ -1,5 +1,7 @@
 # Network Automation Scripts
 
+[![tests](https://github.com/adeyholar/network-automation-scripts/actions/workflows/tests.yml/badge.svg)](https://github.com/adeyholar/network-automation-scripts/actions/workflows/tests.yml)
+
 A practical toolkit for automating day-to-day firewall and SD-WAN operations: **Palo Alto Networks PAN-OS** object and policy changes, configuration backup/restore, policy and routing exports, plus **VMware VeloCloud**, **FortiGate** and **Windows PowerShell** utilities. Written from hands-on PAN-OS migration experience; examples use documentation IPs; no client data. The tools are written to be safe to run interactively by an engineer at a console.
 
 ## Highlights
